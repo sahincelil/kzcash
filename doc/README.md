@@ -51,6 +51,7 @@ The KZCash Core repo's [root README](/README.md) contains relevant information o
 
 ### Miscellaneous
 - [Assets Attribution](assets-attribution.md)
+- [KaricimGPT Profile](karicimgpt.md)
 - [Files](files.md)
 - [Tor Support](tor.md)
 - [Init Scripts (systemd/upstart/openrc)](init.md)
