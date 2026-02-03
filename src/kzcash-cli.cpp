@@ -20,6 +20,7 @@
 #include <event2/buffer.h>
 #include <event2/keyvalq_struct.h>
 
+#include <memory>
 #include <univalue.h>
 
 using namespace std;
@@ -126,6 +127,33 @@ struct HTTPReply
     std::string body;
 };
 
+struct EventBaseDeleter
+{
+    void operator()(event_base* base) const
+    {
+        if (base)
+            event_base_free(base);
+    }
+};
+
+struct HttpConnectionDeleter
+{
+    void operator()(evhttp_connection* connection) const
+    {
+        if (connection)
+            evhttp_connection_free(connection);
+    }
+};
+
+struct HttpRequestDeleter
+{
+    void operator()(evhttp_request* request) const
+    {
+        if (request)
+            evhttp_request_free(request);
+    }
+};
+
 static void http_request_done(struct evhttp_request *req, void *ctx)
 {
     HTTPReply *reply = static_cast<HTTPReply*>(ctx);
@@ -157,18 +185,18 @@ UniValue CallRPC(const string& strMethod, const UniValue& params)
     int port = GetArg("-rpcport", BaseParams().RPCPort());
 
     // Create event base
-    struct event_base *base = event_base_new(); // TODO RAII
+    std::unique_ptr<event_base, EventBaseDeleter> base(event_base_new());
     if (!base)
         throw runtime_error("cannot create event_base");
 
     // Synchronously look up hostname
-    struct evhttp_connection *evcon = evhttp_connection_base_new(base, NULL, host.c_str(), port); // TODO RAII
+    std::unique_ptr<evhttp_connection, HttpConnectionDeleter> evcon(evhttp_connection_base_new(base.get(), NULL, host.c_str(), port));
     if (evcon == NULL)
         throw runtime_error("create connection failed");
-    evhttp_connection_set_timeout(evcon, GetArg("-rpcclienttimeout", DEFAULT_HTTP_CLIENT_TIMEOUT));
+    evhttp_connection_set_timeout(evcon.get(), GetArg("-rpcclienttimeout", DEFAULT_HTTP_CLIENT_TIMEOUT));
 
     HTTPReply response;
-    struct evhttp_request *req = evhttp_request_new(http_request_done, (void*)&response); // TODO RAII
+    std::unique_ptr<evhttp_request, HttpRequestDeleter> req(evhttp_request_new(http_request_done, (void*)&response));
     if (req == NULL)
         throw runtime_error("create http request failed");
 
@@ -186,7 +214,7 @@ UniValue CallRPC(const string& strMethod, const UniValue& params)
         strRPCUserColonPass = mapArgs["-rpcuser"] + ":" + mapArgs["-rpcpassword"];
     }
 
-    struct evkeyvalq *output_headers = evhttp_request_get_output_headers(req);
+    struct evkeyvalq *output_headers = evhttp_request_get_output_headers(req.get());
     assert(output_headers);
     evhttp_add_header(output_headers, "Host", host.c_str());
     evhttp_add_header(output_headers, "Connection", "close");
@@ -194,20 +222,19 @@ UniValue CallRPC(const string& strMethod, const UniValue& params)
 
     // Attach request data
     std::string strRequest = JSONRPCRequest(strMethod, params, 1);
-    struct evbuffer * output_buffer = evhttp_request_get_output_buffer(req);
+    struct evbuffer * output_buffer = evhttp_request_get_output_buffer(req.get());
     assert(output_buffer);
     evbuffer_add(output_buffer, strRequest.data(), strRequest.size());
 
-    int r = evhttp_make_request(evcon, req, EVHTTP_REQ_POST, "/");
+    int r = evhttp_make_request(evcon.get(), req.get(), EVHTTP_REQ_POST, "/");
     if (r != 0) {
-        evhttp_connection_free(evcon);
-        event_base_free(base);
         throw CConnectionFailed("send http request failed");
     }
 
-    event_base_dispatch(base);
-    evhttp_connection_free(evcon);
-    event_base_free(base);
+    // Ownership of req is transferred to libevent after a successful call.
+    req.release();
+
+    event_base_dispatch(base.get());
 
     if (response.status == 0)
         throw CConnectionFailed("couldn't connect to server");
